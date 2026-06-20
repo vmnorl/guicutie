@@ -1,6 +1,6 @@
 --[[
-    ModernUI Interface Suite v2.0
-    Complete Combined Script - Just paste and run
+    ModernUI Interface Suite v2.1
+    Fixed positioning + UI toggle keybind picker
 ]]
 
 -- ═══════════════════════════════════════════════════════════════
@@ -12,7 +12,7 @@ ModernUI.__index = ModernUI
 ModernUI.Flags = {}
 ModernUI.Elements = {}
 ModernUI.Windows = {}
-ModernUI.Version = "2.0.0"
+ModernUI.Version = "2.1.0"
 
 -- Services
 local TweenService     = game:GetService("TweenService")
@@ -351,20 +351,20 @@ local function makeShadow(parent)
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- DRAGGING
+-- DRAGGING SYSTEM (FIXED - stays within screen bounds)
 -- ═══════════════════════════════════════════════════════════════
 
 local function makeDraggable(frame, handle)
     local dragging   = false
+    local dragStart  = nil
     local startPos   = nil
-    local startMouse = nil
 
     handle.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
             dragging   = true
+            dragStart  = input.Position
             startPos   = frame.Position
-            startMouse = UserInputService:GetMouseLocation()
         end
     end)
 
@@ -377,12 +377,23 @@ local function makeDraggable(frame, handle)
 
     local c2 = RunService.Heartbeat:Connect(function()
         if not dragging or Hidden then return end
+        
         local mouse = UserInputService:GetMouseLocation()
-        local delta = mouse - startMouse
-        local vp    = workspace.CurrentCamera.ViewportSize
-        local newX  = math.clamp(startPos.X.Offset + delta.X, 0, vp.X - frame.AbsoluteSize.X)
-        local newY  = math.clamp(startPos.Y.Offset + delta.Y, 0, vp.Y - frame.AbsoluteSize.Y)
-        frame.Position = UDim2.new(startPos.X.Scale, newX, startPos.Y.Scale, newY)
+        local delta = mouse - dragStart
+        
+        -- Calculate new position
+        local newX = startPos.X.Offset + delta.X
+        local newY = startPos.Y.Offset + delta.Y
+        
+        -- Get viewport size
+        local vpSize = workspace.CurrentCamera.ViewportSize
+        
+        -- Clamp position to keep window on screen
+        newX = math.clamp(newX, 0, vpSize.X - frame.AbsoluteSize.X)
+        newY = math.clamp(newY, 0, vpSize.Y - frame.AbsoluteSize.Y)
+        
+        -- Apply position (using offset only, no scale)
+        frame.Position = UDim2.new(0, newX, 0, newY)
     end)
 
     frame.Destroying:Connect(function()
@@ -409,6 +420,10 @@ local function saveConfig()
             if c then data[flag] = {R=math.floor(c.R*255),G=math.floor(c.G*255),B=math.floor(c.B*255)} end
         end
     end
+    
+    -- Save UI toggle keybind
+    data["__UIToggleKeybind"] = openKeybind
+    
     local ok, encoded = pcall(HttpService.JSONEncode, HttpService, data)
     if ok then
         pcall(writefile, ConfigFolder.."/"..CFileName..ConfigExt, encoded)
@@ -422,18 +437,26 @@ local function loadConfig()
     local raw = readfile(path)
     local ok, data = pcall(HttpService.JSONDecode, HttpService, raw)
     if not ok or type(data) ~= "table" then return end
+    
+    -- Load UI toggle keybind
+    if data["__UIToggleKeybind"] then
+        openKeybind = data["__UIToggleKeybind"]
+    end
+    
     for flag, value in pairs(data) do
-        local el = ModernUI.Flags[flag]
-        if el and el.Set then
-            task.spawn(function()
-                pcall(function()
-                    if el.Type == "ColorPicker" then
-                        el:Set(Color3.fromRGB(value.R, value.G, value.B))
-                    else
-                        el:Set(value)
-                    end
+        if flag ~= "__UIToggleKeybind" then
+            local el = ModernUI.Flags[flag]
+            if el and el.Set then
+                task.spawn(function()
+                    pcall(function()
+                        if el.Type == "ColorPicker" then
+                            el:Set(Color3.fromRGB(value.R, value.G, value.B))
+                        else
+                            el:Set(value)
+                        end
+                    end)
                 end)
-            end)
+            end
         end
     end
 end
@@ -623,12 +646,13 @@ function ModernUI:CreateWindow(config)
     end)
 
     -- ══════════════════════════════════════════════════════════
-    -- WINDOW FRAME
+    -- WINDOW FRAME (FIXED POSITIONING)
     -- ══════════════════════════════════════════════════════════
     local Window = Instance.new("Frame")
     Window.Name                  = "ModernWindow"
     Window.Size                  = UDim2.new(0, 600, 0, 540)
-    Window.Position              = UDim2.new(0.5, -300, 0.5, -270)
+    -- Start centered using offset only (no scale to prevent drift)
+    Window.Position              = UDim2.new(0, (workspace.CurrentCamera.ViewportSize.X / 2) - 300, 0, (workspace.CurrentCamera.ViewportSize.Y / 2) - 270)
     Window.BackgroundColor3      = SelectedTheme.Background
     Window.BorderSizePixel       = 0
     Window.ClipsDescendants      = false
@@ -833,7 +857,7 @@ function ModernUI:CreateWindow(config)
     local isMinimised   = false
     local isMaximised   = false
     local normalSize    = UDim2.new(0, 600, 0, 540)
-    local normalPos     = UDim2.new(0.5, -300, 0.5, -270)
+    local savedPos      = Window.Position  -- Track position for minimize/maximize
 
     makeDraggable(Window, Topbar)
 
@@ -849,6 +873,7 @@ function ModernUI:CreateWindow(config)
             Sidebar.Visible     = true
         else
             isMinimised         = true
+            savedPos            = Window.Position
             ContentArea.Visible = false
             Sidebar.Visible     = false
             tween(Window, spring(0.55), {Size = UDim2.new(0, 600, 0, 54)})
@@ -863,12 +888,17 @@ function ModernUI:CreateWindow(config)
         Debounce = true
         if isMaximised then
             isMaximised = false
-            tween(Window, spring(0.55), {Size = normalSize, Position = normalPos})
+            tween(Window, spring(0.55), {
+                Size     = normalSize,
+                Position = savedPos
+            })
         else
             isMaximised = true
+            savedPos    = Window.Position
+            local vp = workspace.CurrentCamera.ViewportSize
             tween(Window, spring(0.55), {
-                Size     = UDim2.new(0, 780, 0, 600),
-                Position = UDim2.new(0.5, -390, 0.5, -300)
+                Size     = UDim2.new(0, math.min(vp.X - 40, 900), 0, math.min(vp.Y - 40, 650)),
+                Position = UDim2.new(0, 20, 0, 20)
             })
         end
         task.wait(0.6)
@@ -882,25 +912,44 @@ function ModernUI:CreateWindow(config)
         ModernUI:Destroy()
     end)
 
-    -- Toggle hotkey
-    local hotkey = UserInputService.InputBegan:Connect(function(input, processed)
-        if processed then return end
-        local ok, kc = pcall(function() return Enum.KeyCode[openKeybind] end)
-        if ok and input.KeyCode == kc then
-            if Hidden then
-                Hidden         = false
-                Window.Visible = true
-                tween(Window, spring(0.5), {BackgroundTransparency = 0})
-            else
-                Hidden = true
-                tween(Window, ease(0.35), {BackgroundTransparency = 1})
-                task.delay(0.38, function()
-                    if Hidden then Window.Visible = false end
-                end)
-            end
+    -- ══════════════════════════════════════════════════════════
+    -- TOGGLE HOTKEY (now uses saved keybind)
+    -- ══════════════════════════════════════════════════════════
+    local currentToggleConn = nil
+    
+    local function updateToggleKeybind(newKey)
+        openKeybind = newKey
+        
+        -- Disconnect old connection
+        if currentToggleConn then
+            pcall(function() currentToggleConn:Disconnect() end)
         end
-    end)
-    table.insert(keybindConns, hotkey)
+        
+        -- Create new connection
+        currentToggleConn = UserInputService.InputBegan:Connect(function(input, processed)
+            if processed then return end
+            local ok, kc = pcall(function() return Enum.KeyCode[openKeybind] end)
+            if ok and input.KeyCode == kc then
+                if Hidden then
+                    Hidden         = false
+                    Window.Visible = true
+                    tween(Window, spring(0.5), {BackgroundTransparency = 0})
+                else
+                    Hidden = true
+                    tween(Window, ease(0.35), {BackgroundTransparency = 1})
+                    task.delay(0.38, function()
+                        if Hidden then Window.Visible = false end
+                    end)
+                end
+            end
+        end)
+        
+        table.insert(keybindConns, currentToggleConn)
+        saveConfig()
+    end
+    
+    -- Set initial keybind
+    updateToggleKeybind(openKeybind)
 
     -- Fade in
     tween(Window, spring(0.7), {BackgroundTransparency = 0})
@@ -2270,6 +2319,28 @@ function ModernUI:CreateWindow(config)
         return Tab
     end
 
+    -- ══════════════════════════════════════════════════════════
+    -- WINDOW SETTINGS TAB (UI Toggle Keybind Picker)
+    -- ══════════════════════════════════════════════════════════
+    local SettingsTab = WindowObj:CreateTab("⚙ Settings")
+    
+    SettingsTab:CreateSection("Interface")
+    
+    SettingsTab:CreateKeybind({
+        Name           = "Toggle UI Keybind",
+        CurrentKeybind = openKeybind,
+        CallOnChange   = true,
+        Callback       = function(key)
+            updateToggleKeybind(key)
+            ModernUI:Notify({
+                Title   = "Keybind Updated",
+                Content = "Press " .. key .. " to toggle the UI",
+                Type    = "Success",
+                Duration = 3,
+            })
+        end,
+    })
+
     -- Window-level methods
     function WindowObj:Notify(data)
         ModernUI:Notify(data)
@@ -2327,13 +2398,13 @@ function ModernUI:SetTheme(name)
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- EXAMPLE USAGE BELOW  ← everything works from here down
+-- EXAMPLE USAGE
 -- ═══════════════════════════════════════════════════════════════
 
 local Window = ModernUI:CreateWindow({
-    Name     = "ModernUI Example",
-    Subtitle = "All elements demo",
-    Theme    = "Default",   -- try "Neon", "Rose", "Ocean"
+    Name     = "ModernUI Fixed",
+    Subtitle = "Positioning fixed + Keybind picker",
+    Theme    = "Default",
     ToggleKeybind = "RightControl",
     ConfigurationSaving = {
         Enabled    = true,
@@ -2342,146 +2413,36 @@ local Window = ModernUI:CreateWindow({
     },
 })
 
--- ── Home Tab ─────────────────────────────────────────────────
-local Home = Window:CreateTab("Home")
+local Main = Window:CreateTab("Main")
 
-Home:CreateSection("Info")
-Home:CreateLabel("Welcome to ModernUI!")
-Home:CreateParagraph({
-    Title   = "About",
-    Content = "This demo shows every element. Explore the tabs!",
+Main:CreateSection("Welcome")
+Main:CreateLabel("✨ Position fixed! No more drifting to the right.")
+Main:CreateParagraph({
+    Title   = "What's New",
+    Content = "• Window dragging now stays within screen bounds\n• Added UI Toggle Keybind picker in Settings tab\n• Keybind is saved and loaded with config\n• Press your chosen key to hide/show the UI",
 })
-Home:CreateDivider()
 
-local bar = Home:CreateProgressBar({Name = "Demo Bar", CurrentValue = 40})
-Home:CreateButton({
-    Name       = "Animate Bar",
-    ButtonText = "Run",
+Main:CreateDivider()
+
+Main:CreateButton({
+    Name       = "Test Notification",
+    ButtonText = "Send",
     Callback   = function()
-        for i = 0, 100, 5 do
-            bar:Set(i)
-            task.wait(0.04)
-        end
+        ModernUI:Notify({
+            Title   = "Success!",
+            Content = "Window positioning is now fixed. Try dragging the window - it won't go off-screen!",
+            Type    = "Success",
+            Duration = 5,
+        })
     end,
 })
 
--- ── Controls Tab ─────────────────────────────────────────────
-local Controls = Window:CreateTab("Controls")
-
-Controls:CreateSection("Toggles & Sliders")
-
-Controls:CreateToggle({
-    Name         = "Infinite Jump",
-    Description  = "Jump while in the air",
-    CurrentValue = false,
-    Flag         = "InfJump",
-    Callback     = function(v) _G.InfJump = v end,
-})
-
-game:GetService("UserInputService").JumpRequest:Connect(function()
-    if _G.InfJump then
-        local char = Players.LocalPlayer.Character
-        if char and char:FindFirstChild("Humanoid") then
-            char.Humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-        end
-    end
-end)
-
-Controls:CreateSlider({
-    Name         = "Walk Speed",
-    Range        = {1, 200},
-    Increment    = 1,
-    Suffix       = "studs/s",
-    CurrentValue = 16,
-    Flag         = "WalkSpeed",
-    Callback     = function(v)
-        local char = Players.LocalPlayer.Character
-        if char and char:FindFirstChild("Humanoid") then
-            char.Humanoid.WalkSpeed = v
-        end
-    end,
-})
-
-Controls:CreateSlider({
-    Name         = "Jump Power",
-    Range        = {0, 400},
-    Increment    = 5,
-    Suffix       = "power",
-    CurrentValue = 50,
-    Flag         = "JumpPower",
-    Callback     = function(v)
-        local char = Players.LocalPlayer.Character
-        if char and char:FindFirstChild("Humanoid") then
-            char.Humanoid.JumpPower = v
-        end
-    end,
-})
-
-Controls:CreateDivider()
-Controls:CreateSection("Dropdown & Input")
-
-Controls:CreateDropdown({
-    Name          = "Select Team",
-    Options       = {"Red", "Blue", "Green", "Yellow"},
-    CurrentOption = {"Red"},
-    Flag          = "Team",
-    Callback      = function(opt)
-        print("Team selected:", opt[1])
-    end,
-})
-
-Controls:CreateInput({
-    Name                    = "Chat Message",
-    PlaceholderText         = "Type and press Enter...",
-    Flag                    = "ChatMsg",
-    RemoveTextAfterFocusLost = true,
-    Callback                = function(text, enter)
-        if enter and text ~= "" then
-            print("[Chat]", text)
-        end
-    end,
-})
-
--- ── Visuals Tab ──────────────────────────────────────────────
-local Visuals = Window:CreateTab("Visuals")
-
-Visuals:CreateSection("Colors & Keybinds")
-
-Visuals:CreateColorPicker({
-    Name         = "Accent Color",
-    CurrentColor = Color3.fromRGB(99, 102, 241),
-    Flag         = "AccentCol",
-    Callback     = function(col)
-        print("Color picked:", col)
-    end,
-})
-
-Visuals:CreateKeybind({
-    Name           = "Toggle UI",
-    CurrentKeybind = "RightControl",
-    CallOnChange   = false,
-    Flag           = "UIToggle",
-    Callback       = function()
-        print("UI toggled via keybind")
-    end,
-})
-
--- ── Search Tab ───────────────────────────────────────────────
-local Search = Window:CreateTab("Search")
-Search:CreateSection("Search Demo")
-Search:CreateSearchBar()
-
-for _, n in ipairs({"Auto Farm","Auto Collect","God Mode","Speed Hack","Silent Aim","Fly"}) do
-    Search:CreateToggle({Name = n, CurrentValue = false, Callback = function() end})
-end
-
--- Load config and show ready notification
 Window:LoadConfiguration()
 
 task.wait(1)
 ModernUI:Notify({
     Title   = "Ready!",
-    Content = "UI loaded successfully. Press RightControl to hide/show.",
+    Content = "Window positioning fixed. Check Settings tab to change the UI toggle keybind!",
     Type    = "Success",
-    Duration = 5,
+    Duration = 6,
 })
